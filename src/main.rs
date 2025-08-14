@@ -65,7 +65,7 @@ fn authenticate(
     let size = u32::from_le_bytes(size_buf);
     let mut buf = vec![0; size as usize];
     reader.read_exact(&mut buf)?;
-    let (id, typ, _) = parse_packet(size, &buf)?;
+    let (id, typ, _) = parse_packet(&buf)?;
 
     if typ != 2 || id != 0 {
         Err("Unmatched response".into())
@@ -92,7 +92,7 @@ fn execute_command(
     let size = u32::from_le_bytes(size_buf);
     let mut buf = vec![0; size as usize];
     reader.read_exact(&mut buf)?;
-    let (id, typ, body) = parse_packet(size, &buf)?;
+    let (id, typ, body) = parse_packet(&buf)?;
     
     if typ != 0 || id != 0 {
         Err("Unmatched response".into())
@@ -101,13 +101,13 @@ fn execute_command(
     }
 }
 
-fn parse_packet(size: u32, mut bytes: &[u8]) -> Result<(i32, i32, String), io::Error> {
+fn parse_packet(mut bytes: &[u8]) -> Result<(i32, i32, String), io::Error> {
     let mut buf = [0; 4];
     bytes.read_exact(&mut buf)?;
     let id = i32::from_le_bytes(buf);
     bytes.read_exact(&mut buf)?;
     let typ = i32::from_le_bytes(buf);
-    let body = String::from_utf8_lossy(&bytes[..size as usize - 10]);
+    let body = String::from_utf8_lossy(&bytes[..bytes.len() - 2]);
 
     Ok((id, typ, body.into_owned()))
 }
