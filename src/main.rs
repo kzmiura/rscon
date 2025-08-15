@@ -15,12 +15,20 @@ struct Args {
     command: String,
 }
 
+const SERVERDATA_AUTH: i32 = 3;
+const SERVERDATA_AUTH_RESPONSE: i32 = 2;
+const SERVERDATA_EXECCOMMAND: i32 = 2;
+const SERVERDATA_RESPONSE_VALUE: i32 = 0;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     let stream = TcpStream::connect(args.address)?;
-    authenticate(&stream, args.password)?;
-    let response = execute_command(&stream, args.command)?;
+    let mut reader = BufReader::new(&stream);
+    let mut writer = BufWriter::new(&stream);
+    authenticate(&mut reader, &mut writer, args.password)?;
+
+    let response = execute_command(&mut reader, &mut writer, args.command)?;
     println!("{}", response);
 
     Ok(())
@@ -31,12 +39,12 @@ fn write_rcon_to(
     id: i32,
     typ: i32,
     body: impl AsRef<str>,
-) -> Result<(), io::Error> {
+) -> io::Result<()> {
     let body = body.as_ref();
     let body_bytes = body.as_bytes();
-    let size = (size_of_val(&id) + size_of_val(&typ) + body_bytes.len() + 2) as u32;
+    let size = size_of_val(&id) + size_of_val(&typ) + body_bytes.len() + 2;
     let bytes = [
-        &size.to_le_bytes(),
+        &(size as u32).to_le_bytes(),
         &id.to_le_bytes(),
         &typ.to_le_bytes(),
         body_bytes,
@@ -49,27 +57,37 @@ fn write_rcon_to(
     Ok(())
 }
 
-fn authenticate(
-    stream: &TcpStream,
-    password: impl AsRef<str>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut reader = BufReader::new(stream);
-    let mut writer = BufWriter::new(stream);
-    let id = 0;
-    let typ = 3;
-    let password = password.as_ref();
-    write_rcon_to(&mut writer, id, typ, password)?;
-
+fn read_rcon_from(reader: &mut impl Read) -> io::Result<(i32, i32, String)> {
     let mut size_buf = [0; 4];
     reader.read_exact(&mut size_buf)?;
     let size = u32::from_le_bytes(size_buf);
-    let mut buf = vec![0; size as usize];
-    reader.read_exact(&mut buf)?;
-    let (id, typ, _) = parse_packet(&buf)?;
 
-    if typ != 2 || id != 0 {
+    let mut id_buf = [0; 4];
+    reader.read_exact(&mut id_buf)?;
+    let id = i32::from_le_bytes(id_buf);
+
+    let mut typ_buf = [0; 4];
+    reader.read_exact(&mut typ_buf)?;
+    let typ = i32::from_le_bytes(typ_buf);
+
+    let mut body_buf = vec![0; size as usize - 4 - 4];
+    reader.read_exact(&mut body_buf)?;
+    let body = String::from_utf8_lossy(&body_buf.trim_ascii_end());
+
+    Ok((id, typ, body.into_owned()))
+}
+
+fn authenticate(
+    reader: &mut impl BufRead,
+    writer: &mut impl Write,
+    password: impl AsRef<str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let password = password.as_ref();
+    write_rcon_to(writer, 0, SERVERDATA_AUTH, password)?;
+    let (id, typ, _) = read_rcon_from(reader)?;
+    if typ != SERVERDATA_AUTH_RESPONSE || id > 0 {
         Err("Unmatched response".into())
-    } else if id == -1 {
+    } else if id < 0 {
         Err("Authentication failed".into())
     } else {
         Ok(())
@@ -77,37 +95,16 @@ fn authenticate(
 }
 
 fn execute_command(
-    stream: &TcpStream,
+    reader: &mut impl BufRead,
+    writer: &mut impl Write,
     command: impl AsRef<str>,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let mut reader = BufReader::new(stream);
-    let mut writer = BufWriter::new(stream);
-    let id = 0;
-    let typ = 2;
     let command = command.as_ref();
-    write_rcon_to(&mut writer, id, typ, command)?;
-
-    let mut size_buf = [0; 4];
-    reader.read_exact(&mut size_buf)?;
-    let size = u32::from_le_bytes(size_buf);
-    let mut buf = vec![0; size as usize];
-    reader.read_exact(&mut buf)?;
-    let (id, typ, body) = parse_packet(&buf)?;
-    
-    if typ != 0 || id != 0 {
+    write_rcon_to(writer, 0, SERVERDATA_EXECCOMMAND, command)?;
+    let (id, typ, response) = read_rcon_from(reader)?;
+    if typ != SERVERDATA_RESPONSE_VALUE || id != 0 {
         Err("Unmatched response".into())
     } else {
-        Ok(body)
+        Ok(response)
     }
-}
-
-fn parse_packet(mut bytes: &[u8]) -> Result<(i32, i32, String), io::Error> {
-    let mut buf = [0; 4];
-    bytes.read_exact(&mut buf)?;
-    let id = i32::from_le_bytes(buf);
-    bytes.read_exact(&mut buf)?;
-    let typ = i32::from_le_bytes(buf);
-    let body = String::from_utf8_lossy(&bytes[..bytes.len() - 2]);
-
-    Ok((id, typ, body.into_owned()))
 }
