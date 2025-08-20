@@ -70,9 +70,10 @@ fn read_rcon_from(reader: &mut impl Read) -> io::Result<(i32, i32, String)> {
     reader.read_exact(&mut typ_buf)?;
     let typ = i32::from_le_bytes(typ_buf);
 
-    let mut body_buf = vec![0; size as usize - 4 - 4];
+    let mut body_buf = vec![0; size as usize - 4 - 4 - 2];
     reader.read_exact(&mut body_buf)?;
-    let body = String::from_utf8_lossy(&body_buf.trim_ascii_end());
+    let body = String::from_utf8_lossy(&body_buf);
+    reader.read_exact(&mut [0; 2])?;
 
     Ok((id, typ, body.into_owned()))
 }
@@ -85,12 +86,14 @@ fn authenticate(
     let password = password.as_ref();
     write_rcon_to(writer, 0, SERVERDATA_AUTH, password)?;
     let (id, typ, _) = read_rcon_from(reader)?;
-    if typ != SERVERDATA_AUTH_RESPONSE || id > 0 {
-        Err("Unmatched response".into())
-    } else if id < 0 {
-        Err("Authentication failed".into())
+    if typ != SERVERDATA_AUTH_RESPONSE {
+        Err("Unexpected response type".into())
     } else {
-        Ok(())
+        match id {
+            0 => Ok(()),
+            -1 => Err("Authentication failed".into()),
+            _ => Err("Unmatched response id".into()),
+        }
     }
 }
 
@@ -101,10 +104,19 @@ fn execute_command(
 ) -> Result<String, Box<dyn std::error::Error>> {
     let command = command.as_ref();
     write_rcon_to(writer, 0, SERVERDATA_EXECCOMMAND, command)?;
-    let (id, typ, response) = read_rcon_from(reader)?;
-    if typ != SERVERDATA_RESPONSE_VALUE || id != 0 {
-        Err("Unmatched response".into())
-    } else {
-        Ok(response)
+    write_rcon_to(writer, -1, SERVERDATA_RESPONSE_VALUE, "")?;
+
+    let mut response = String::new();
+    loop {
+        let (id, typ, body) = read_rcon_from(reader)?;
+        if typ != SERVERDATA_RESPONSE_VALUE {
+            return Err("Unexpected response type".into());
+        }
+        if id == -1 {
+            break;
+        }
+        response += &body;
     }
+
+    Ok(response)
 }
