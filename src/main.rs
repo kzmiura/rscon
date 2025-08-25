@@ -11,8 +11,6 @@ struct Args {
     address: SocketAddr,
     #[arg(short, long)]
     password: String,
-    #[arg(short, long)]
-    command: String,
 }
 
 const SERVERDATA_AUTH: i32 = 3;
@@ -28,8 +26,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut writer = BufWriter::new(&stream);
     authenticate(&mut reader, &mut writer, args.password)?;
 
-    let response = execute_command(&mut reader, &mut writer, args.command)?;
-    println!("{}", response);
+    let mut buffer = String::new();
+    let stdin = io::stdin();
+    {
+        let mut handle = stdin.lock();
+        while handle.read_line(&mut buffer)? > 0 {
+            let command = buffer.trim();
+            if command.is_empty() {
+                continue;
+            }
+            let response = execute_command(&mut reader, &mut writer, command)?;
+            print!("{}", response);
+            buffer.clear();
+        }
+    }
 
     Ok(())
 }
