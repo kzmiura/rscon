@@ -1,132 +1,152 @@
-use std::io::prelude::*;
-use std::io::{self, BufReader, BufWriter};
-use std::net::{SocketAddr, TcpStream};
-
 use clap::Parser;
+use core::panic;
+use std::error::Error;
+use std::io;
+use std::io::prelude::*;
+use std::io::{BufReader, BufWriter};
+use std::net::{SocketAddr, TcpStream};
+use std::time::Duration;
 
-#[derive(Parser, Debug)]
+#[derive(Debug, Parser)]
 #[command(version, about, long_about = None)]
-struct Args {
+struct Cli {
     #[arg(short, long)]
     address: SocketAddr,
     #[arg(short, long)]
     password: String,
 }
 
-const SERVERDATA_AUTH: i32 = 3;
-const SERVERDATA_AUTH_RESPONSE: i32 = 2;
-const SERVERDATA_EXECCOMMAND: i32 = 2;
-const SERVERDATA_RESPONSE_VALUE: i32 = 0;
+#[derive(Debug)]
+struct Response {
+    id: i32,
+    typ: ResponseType,
+    body: String,
+}
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
+#[derive(Debug)]
+enum ResponseType {
+    AuthResponse = 2,
+    ResponseValue = 0,
+}
 
-    let stream = TcpStream::connect(args.address)?;
+fn main() {
+    let cli = Cli::parse();
+
+    let stream = TcpStream::connect_timeout(&cli.address, Duration::from_secs(1))
+        .expect("Couldn't connect to the server...");
     let mut reader = BufReader::new(&stream);
     let mut writer = BufWriter::new(&stream);
-    authenticate(&mut reader, &mut writer, args.password)?;
 
-    let mut buffer = String::new();
+    authenticate(&mut reader, &mut writer, &cli.password).expect("Authentication failed...");
+
     let stdin = io::stdin();
     {
-        let mut handle = stdin.lock();
-        while handle.read_line(&mut buffer)? > 0 {
-            let command = buffer.trim();
+        let handle = stdin.lock();
+        for line in handle.lines() {
+            let line = line.expect("Reading line failed...");
+            let command = line.trim();
             if command.is_empty() {
                 continue;
             }
-            let response = execute_command(&mut reader, &mut writer, command)?;
-            print!("{}", response);
-            buffer.clear();
+            let response = execute_command(&mut reader, &mut writer, command).expect("Executing command failed...");
+            println!("{}", response);
         }
     }
-
-    Ok(())
 }
 
 fn write_rcon_to(
     writer: &mut impl Write,
     id: i32,
-    typ: i32,
+    typ: u32,
     body: impl AsRef<str>,
 ) -> io::Result<()> {
     let body = body.as_ref();
+    let id_bytes = &id.to_le_bytes();
+    let typ_bytes = &typ.to_le_bytes();
     let body_bytes = body.as_bytes();
-    let size = size_of_val(&id) + size_of_val(&typ) + body_bytes.len() + 2;
-    let bytes = [
-        &(size as u32).to_le_bytes(),
-        &id.to_le_bytes(),
-        &typ.to_le_bytes(),
-        body_bytes,
-        &[0; 2],
-    ]
-    .concat();
-    writer.write_all(&bytes)?;
+    let null_bytes = b"\0\0";
+    let size = size_of_val(id_bytes)
+        + size_of_val(typ_bytes)
+        + size_of_val(body_bytes)
+        + size_of_val(null_bytes);
+    let size_bytes = &(size as u32).to_le_bytes();
+
+    for bytes in [size_bytes, id_bytes, typ_bytes, body_bytes, null_bytes] {
+        writer.write_all(bytes)?;
+    }
     writer.flush()?;
 
     Ok(())
 }
 
-fn read_rcon_from(reader: &mut impl Read) -> io::Result<(i32, i32, String)> {
-    let mut size_buf = [0; 4];
-    reader.read_exact(&mut size_buf)?;
-    let size = u32::from_le_bytes(size_buf);
+fn read_rcon_from(reader: &mut impl Read) -> io::Result<Response> {
+    let mut four_bytes_buf = [0; 4];
+    reader.read_exact(&mut four_bytes_buf)?;
+    let size = u32::from_le_bytes(four_bytes_buf);
 
-    let mut id_buf = [0; 4];
-    reader.read_exact(&mut id_buf)?;
-    let id = i32::from_le_bytes(id_buf);
+    let mut buf = vec![0; size as usize - 2];
+    reader.read_exact(&mut buf)?;
+    let id = i32::from_le_bytes(buf[0..4].try_into().expect("slice should be 4 bytes"));
+    let typ = u32::from_le_bytes(buf[4..8].try_into().expect("slice should be 4 bytes"));
+    let body = String::from_utf8_lossy(&buf[8..]);
 
-    let mut typ_buf = [0; 4];
-    reader.read_exact(&mut typ_buf)?;
-    let typ = i32::from_le_bytes(typ_buf);
-
-    let mut body_buf = vec![0; size as usize - 4 - 4 - 2];
-    reader.read_exact(&mut body_buf)?;
-    let body = String::from_utf8_lossy(&body_buf);
+    // read the two null bytes
     reader.read_exact(&mut [0; 2])?;
 
-    Ok((id, typ, body.into_owned()))
+    let typ = match typ {
+        0 => ResponseType::ResponseValue,
+        2 => ResponseType::AuthResponse,
+        _ => panic!("unknown response type: {}", typ),
+    };
+    let body = body.into_owned();
+
+    Ok(Response { id, typ, body })
 }
 
 fn authenticate(
-    reader: &mut impl BufRead,
+    reader: &mut impl Read,
     writer: &mut impl Write,
     password: impl AsRef<str>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let password = password.as_ref();
-    write_rcon_to(writer, 0, SERVERDATA_AUTH, password)?;
-    let (id, typ, _) = read_rcon_from(reader)?;
-    if typ != SERVERDATA_AUTH_RESPONSE {
-        Err("Unexpected response type".into())
-    } else {
-        match id {
-            0 => Ok(()),
-            -1 => Err("Authentication failed".into()),
-            _ => Err("Unmatched response id".into()),
+) -> Result<(), Box<dyn Error>> {
+    write_rcon_to(writer, 0, 3, password)?;
+    let response = read_rcon_from(reader)?;
+    match response.typ {
+        ResponseType::AuthResponse => {
+            if response.id == -1 {
+                Err("authentication failed".into())
+            } else {
+                Ok(())
+            }
         }
+        _ => panic!("response type should be AuthResponse"),
     }
 }
 
 fn execute_command(
-    reader: &mut impl BufRead,
+    reader: &mut impl Read,
     writer: &mut impl Write,
     command: impl AsRef<str>,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let command = command.as_ref();
-    write_rcon_to(writer, 0, SERVERDATA_EXECCOMMAND, command)?;
-    write_rcon_to(writer, -1, SERVERDATA_RESPONSE_VALUE, "")?;
+) -> io::Result<String> {
+    write_rcon_to(writer, 0, 2, command)?;
+    // marker
+    // see also: https://developer.valvesoftware.com/wiki/Source_RCON_Protocol#Multiple-packet_Responses
+    write_rcon_to(writer, -1, 0, "")?;
 
-    let mut response = String::new();
+    let mut result = String::new();
     loop {
-        let (id, typ, body) = read_rcon_from(reader)?;
-        if typ != SERVERDATA_RESPONSE_VALUE {
-            return Err("Unexpected response type".into());
+        let response = read_rcon_from(reader)?;
+        match response.typ {
+            ResponseType::ResponseValue => {
+                if response.id == -1 {
+                    break Ok(result);
+                }
+                if response.id == 0 {
+                    result += &response.body;
+                } else {
+                    panic!("response id should be match the request id");
+                }
+            }
+            _ => panic!("response type should be ResponseValue"),
         }
-        if id == -1 {
-            break;
-        }
-        response += &body;
     }
-
-    Ok(response)
 }
