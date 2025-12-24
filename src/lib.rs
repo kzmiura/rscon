@@ -32,49 +32,49 @@ impl RconClient {
     }
 
     fn read_rcon_from(&mut self) -> io::Result<RconPacket> {
+        let Self { buf_reader, .. } = self;
         let mut buf = [0; 4];
-        self.buf_reader.read_exact(&mut buf)?;
+        buf_reader.read_exact(&mut buf)?;
         let size = i32::from_le_bytes(buf);
 
         let mut buf = vec![0; size.try_into().unwrap()];
-        self.buf_reader.read_exact(&mut buf)?;
-        let (id_bytes, remainder) = buf
-            .split_first_chunk_mut::<4>()
+        buf_reader.read_exact(&mut buf)?;
+        let (&id_bytes, remainder) = buf
+            .split_first_chunk::<4>()
             .expect("Rcon packet should have an id");
-        let (typ_bytes, remainder) = remainder
-            .split_first_chunk_mut::<4>()
+        let (&typ_bytes, remainder) = remainder
+            .split_first_chunk::<4>()
             .expect("Rcon packet should have a type");
         let (body_bytes, _null_bytes) = remainder
             .split_last_chunk::<2>()
             .expect("Rcon packet should have a body and two null bytes");
 
-        let id = i32::from_le_bytes(*id_bytes);
-        let typ = i32::from_le_bytes(*typ_bytes);
-        let body = str::from_utf8(body_bytes).expect("Rcon packet body should be valid ASCII");
-
-        Ok(RconPacket {
-            id,
-            typ,
-            body: body.into(),
-        })
+        let id = i32::from_le_bytes(id_bytes);
+        let typ = i32::from_le_bytes(typ_bytes);
+        let body = str::from_utf8(body_bytes)
+            .expect("Rcon packet body should be valid UTF-8")
+            .to_owned();
+        Ok(RconPacket { id, typ, body })
     }
 
     fn write_rcon_to(&mut self, packet: RconPacket) -> io::Result<()> {
+        let Self { buf_writer, .. } = self;
         let RconPacket { id, typ, body } = packet;
 
         let body_bytes = body.into_bytes();
         let size = i32::try_from(2 * size_of::<i32>() + body_bytes.len() + 2)
             .expect("Rcon packet size should fit in i32");
+
         for bytes in [
-            &size.to_le_bytes(),
-            &id.to_le_bytes(),
-            &typ.to_le_bytes(),
+            &size.to_le_bytes()[..],
+            &id.to_le_bytes()[..],
+            &typ.to_le_bytes()[..],
             &body_bytes[..],
             &[0; 2],
         ] {
-            self.buf_writer.write_all(bytes)?;
+            buf_writer.write_all(bytes)?;
         }
-        self.buf_writer.flush()?;
+        buf_writer.flush()?;
 
         Ok(())
     }
@@ -115,7 +115,7 @@ impl RconClient {
         };
         self.write_rcon_to(marker)?;
 
-        let mut result = String::new();
+        let mut ret = String::new();
         loop {
             match self.read_rcon_from()? {
                 RconPacket {
@@ -123,14 +123,14 @@ impl RconClient {
                     typ: RconPacket::SERVERDATA_RESPONSE_VALUE,
                     body: _,
                 } => {
-                    break Ok(result);
+                    break Ok(ret);
                 }
                 RconPacket {
                     id: 1,
                     typ: RconPacket::SERVERDATA_RESPONSE_VALUE,
                     body,
                 } => {
-                    result += &body;
+                    ret += &body;
                 }
                 _ => panic!("Unexpected Rcon packet during command execution"),
             }

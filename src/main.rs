@@ -1,7 +1,7 @@
 use io::IsTerminal;
 use io::prelude::*;
 use std::io;
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream};
 use std::process::ExitCode;
 
 use rscon::RconClient;
@@ -11,36 +11,31 @@ use clap::Parser;
 #[derive(Debug, Parser)]
 #[command(author, version, about)]
 struct Cli {
-    host: String,
-    port: u16,
+    addr: SocketAddr,
     #[arg(short, long)]
     password: String,
 }
 
 fn main() -> ExitCode {
-    if let Err(e) = run(Cli::parse()) {
-        eprintln!("{e}");
+    let cli = Cli::parse();
+    run(cli).unwrap_or_else(|e| {
+        eprintln!("{}", e);
         ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
-    }
+    })
 }
 
-fn run(cli: Cli) -> io::Result<()> {
-    let Cli {
-        host,
-        port,
-        password,
-    } = cli;
-    let stream = TcpStream::connect((host, port))?;
+fn run(cli: Cli) -> io::Result<ExitCode> {
+    let Cli { addr, password } = cli;
+    let stream = TcpStream::connect(addr)?;
     let mut client = RconClient::new(&stream)?;
     if !client.authenticate(&password)? {
         eprintln!("Authentication failed");
+        Ok(ExitCode::FAILURE)
     } else {
         let mut buf = String::new();
         loop {
             buf.clear();
-            if io::stdout().is_terminal() {
+            if io::stdin().is_terminal() {
                 print!(">>> ");
                 io::stdout().flush()?;
             }
@@ -52,7 +47,6 @@ fn run(cli: Cli) -> io::Result<()> {
             let resp = client.execute_command(command)?;
             println!("{}", resp);
         }
+        Ok(ExitCode::SUCCESS)
     }
-
-    Ok(())
 }
