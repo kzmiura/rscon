@@ -17,40 +17,42 @@ impl RconPacket {
 }
 
 pub struct RconClient {
-    buf_reader: BufReader<TcpStream>,
-    buf_writer: BufWriter<TcpStream>,
+    reader: BufReader<TcpStream>,
+    writer: BufWriter<TcpStream>,
 }
 
 impl RconClient {
     pub fn new(stream: &TcpStream) -> io::Result<Self> {
-        let buf_reader = BufReader::new(stream.try_clone()?);
-        let buf_writer = BufWriter::new(stream.try_clone()?);
-        Ok(RconClient {
-            buf_reader,
-            buf_writer,
-        })
+        let reader = BufReader::new(stream.try_clone()?);
+        let writer = BufWriter::new(stream.try_clone()?);
+
+        Ok(Self { reader, writer })
     }
 
     fn read_rcon_from(&mut self) -> io::Result<RconPacket> {
-        let Self { buf_reader, .. } = self;
+        let Self { reader, .. } = self;
         let mut buf = [0; 4];
-        buf_reader.read_exact(&mut buf)?;
+        reader.read_exact(&mut buf)?;
         let size = i32::from_le_bytes(buf);
 
         let mut buf = vec![0; size.try_into().unwrap()];
-        buf_reader.read_exact(&mut buf)?;
-        let (&id_bytes, remainder) = buf
+        reader.read_exact(&mut buf)?;
+        let (id_bytes, rest) = buf
             .split_first_chunk::<4>()
             .expect("Rcon packet should have an id");
-        let (&typ_bytes, remainder) = remainder
+        let (typ_bytes, rest) = rest
             .split_first_chunk::<4>()
             .expect("Rcon packet should have a type");
-        let (body_bytes, _null_bytes) = remainder
+        let (body_bytes, null_bytes) = rest
             .split_last_chunk::<2>()
             .expect("Rcon packet should have a body and two null bytes");
+        assert_eq!(
+            null_bytes, &[0; 2],
+            "Rcon packet should end with two null bytes"
+        );
 
-        let id = i32::from_le_bytes(id_bytes);
-        let typ = i32::from_le_bytes(typ_bytes);
+        let id = i32::from_le_bytes(*id_bytes);
+        let typ = i32::from_le_bytes(*typ_bytes);
         let body = str::from_utf8(body_bytes)
             .expect("Rcon packet body should be valid UTF-8")
             .to_owned();
@@ -58,7 +60,7 @@ impl RconClient {
     }
 
     fn write_rcon_to(&mut self, packet: RconPacket) -> io::Result<()> {
-        let Self { buf_writer, .. } = self;
+        let Self { writer, .. } = self;
         let RconPacket { id, typ, body } = packet;
 
         let body_bytes = body.into_bytes();
@@ -72,9 +74,9 @@ impl RconClient {
             &body_bytes[..],
             &[0; 2],
         ] {
-            buf_writer.write_all(bytes)?;
+            writer.write_all(bytes)?;
         }
-        buf_writer.flush()?;
+        writer.flush()?;
 
         Ok(())
     }

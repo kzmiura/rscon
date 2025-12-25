@@ -18,19 +18,22 @@ struct Cli {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    run(cli).unwrap_or_else(|e| {
-        eprintln!("{}", e);
-        ExitCode::FAILURE
-    })
+    match run(cli) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("{}", e);
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn run(cli: Cli) -> io::Result<ExitCode> {
     let Cli { addr, password } = cli;
     let stream = TcpStream::connect(addr)?;
     let mut client = RconClient::new(&stream)?;
-    if !client.authenticate(&password)? {
+    let code = if !client.authenticate(&password)? {
         eprintln!("Authentication failed");
-        Ok(ExitCode::FAILURE)
+        ExitCode::FAILURE
     } else {
         let mut buf = String::new();
         loop {
@@ -47,6 +50,7 @@ fn run(cli: Cli) -> io::Result<ExitCode> {
             let resp = client.execute_command(command)?;
             println!("{}", resp);
         }
-        Ok(ExitCode::SUCCESS)
-    }
+        ExitCode::SUCCESS
+    };
+    Ok(code)
 }
